@@ -121,9 +121,11 @@ $cosmosDBKey=(Invoke-AzResourceAction -Force -Action listKeys  -ResourceType $re
 $cosmossecret=(Set-AzKeyVaultSecret -VaultName $keyvaultname -Name cosmosDBAuthorizationKey -SecretValue $(ConvertTo-SecureString $cosmosDBKey -AsPlainText -Force)).Id
 
 #Read value
-$blobKey = ((Get-AzStorageAccountKey -Name $Tollboothstorage -ResourceGroupName $RGName )| Where-Object {$_.KeyName -eq "key1"}).Value
+#$blobKey = ((Get-AzStorageAccountKey -Name $Tollboothstorage -ResourceGroupName $RGName )| Where-Object {$_.KeyName -eq "key1"}).Value
+$blobConnString = (Get-AzStorageAccount -Name $Tollboothstorage -ResourceGroupName $RGName).Context.ConnectionString
 #set Value
-$blobsecret=(Set-AzKeyVaultSecret -VaultName $keyvaultname -Name blobStorageConnection -SecretValue $(ConvertTo-SecureString $blobKey -AsPlainText -Force)).Id
+$blobsecret=(Set-AzKeyVaultSecret -VaultName $keyvaultname -Name blobStorageConnection -SecretValue $(ConvertTo-SecureString $blobConnString -AsPlainText -Force)).Id
+
 
 
 ######## SECTION 2 ############
