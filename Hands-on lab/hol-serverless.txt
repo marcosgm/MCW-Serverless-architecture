@@ -1,0 +1,147 @@
+$subscription="f26f9599-caee-4aae-a5e4-1580c1e2624f"
+$RGName="ServerlessArchitecture"
+$Tollboothstorage="tollboothstorage432name"
+$Location="eastus2"
+$functionAppName="TollBoothFunctionAppMGM"
+$functionAppName2="TollBoothEventsMGM"
+$TopicName="TollBoothEventGridMGM"
+$accountName = "toolboothdbmgm" # must be lowercase and < 31 characters .
+$databaseName = "LicensePlates"
+$containerName = "Processed"
+$containerName2 = "NeedsManualReview"
+$CompVisionName="TollBoothVisionMGM"
+$keyvaultname="TollBoothVaultMGM"
+$resourceGroupName = $RGName
+
+New-AzResourceGroup -Name $RGName -Location $Location
+$storage=(New-AzStorageAccount -Name $Tollboothstorage -ResourceGroupName $RGName -SkuName Standard_LRS -Location $Location)
+$storage | New-AzStorageContainer -Name images
+$storage | New-AzStorageContainer -Name export
+
+# Create the Function App
+az functionapp create --subscription $subscription --resource-group $RGName --consumption-plan-location $Location --runtime "dotnet" --name $functionAppName --storage-account $Tollboothstorage --os-type Windows --disable-app-insights
+
+az functionapp create --subscription $subscription --resource-group $RGName --consumption-plan-location $Location --runtime "node" --name $functionAppName2 --storage-account $Tollboothstorage --os-type Windows --disable-app-insights
+
+New-AzEventGridTopic -ResourceGroupName $RGName -Name $TopicName -Location $Location
+
+# Create an Azure Cosmos Account for Core (SQL) API
+$resourceGroupName = $RGName
+Register-AzResourceProvider -ProviderNamespace Microsoft.DocumentDB
+
+$locations = @(
+    @{ "locationName"=$Location; "failoverPriority"=0 }
+)
+
+$CosmosDBProperties = @{
+    "databaseAccountOfferType"="Standard";
+    "locations"=$locations;
+    "consistencyPolicy"=$consistencyPolicy;
+    "enableMultipleWriteLocations"="false"
+}
+
+New-AzResource -Force -ResourceType "Microsoft.DocumentDb/databaseAccounts"   -ApiVersion "2015-04-08" -ResourceGroupName $resourceGroupName -Location $location -Name $accountName -PropertyObject $CosmosDBProperties
+
+# Create an Azure Cosmos database
+$resourceName = $accountName + "/sql/" + $databaseName
+
+$DataBaseProperties = @{
+    "resource"=@{"id"=$databaseName};
+     "options"=@{ "Throughput"="5000" } 
+}
+
+New-AzResource -Force -ResourceType "Microsoft.DocumentDb/databaseAccounts/apis/databases" `
+    -ApiVersion "2015-04-08" -ResourceGroupName $resourceGroupName `
+    -Name $resourceName -PropertyObject $DataBaseProperties
+
+
+# Create an Azure Cosmos container
+$resourceName = $accountName + "/sql/" + $databaseName + "/" + $containerName
+
+$ContainerProperties = @{
+    "resource"=@{
+        "id"=$containerName;
+        "partitionKey"=@{
+            "paths"=@("/licensePlateText");
+            "kind"="Hash"
+        }
+    };
+    "options"=@{ "Throughput"="5000" }
+}
+
+New-AzResource -Force -ResourceType "Microsoft.DocumentDb/databaseAccounts/apis/databases/containers" `
+    -ApiVersion "2015-04-08" -ResourceGroupName $resourceGroupName `
+    -Name $resourceName -PropertyObject $ContainerProperties
+
+
+
+
+# Create an Azure Cosmos container
+$resourceName = $accountName + "/sql/" + $databaseName + "/" + $containerName2
+
+$ContainerProperties = @{
+    "resource"=@{
+        "id"=$containerName2;
+        "partitionKey"=@{
+            "paths"=@("/fileName");
+            "kind"="Hash"
+        }
+    };
+    "options"=@{ "Throughput"="5000" }
+}
+
+New-AzResource -Force -ResourceType "Microsoft.DocumentDb/databaseAccounts/apis/databases/containers" `
+    -ApiVersion "2015-04-08" -ResourceGroupName $resourceGroupName `
+    -Name $resourceName -PropertyObject $ContainerProperties
+
+
+New-AzCognitiveServicesAccount -ResourceGroupName $RGName -Type ComputerVision -SkuName S1 -Location $Location -Name $CompVisionName
+
+$keyvault=(New-AzKeyVault -ResourceGroupName $RGName -Location $Location -Name $keyvaultname -Sku Standard )
+## TODO ## KEYVAULT ACCESS POLICY IS EMPTY, must add current user
+
+#Read value
+$visionendpoint=(Get-AzCognitiveServicesAccount -ResourceGroupName $RGName -Name $CompVisionName).Endpoint
+$visionkey=(Get-AzCognitiveServicesAccountKey -ResourceGroupName $RGName -Name $CompVisionName).Key1
+#set Value
+$compviewsecret=(Set-AzKeyVaultSecret -VaultName $keyvaultname -Name computerVisionApiKey -SecretValue $(ConvertTo-SecureString $visionkey -AsPlainText -Force)).Id
+
+#Read value
+$TopicKey = (Get-AzEventGridTopicKey -ResourceGroupName $RGName -Name $TopicName).Key1
+#set Value
+$eventgridsecret=(Set-AzKeyVaultSecret -VaultName $keyvaultname -Name eventGridTopicKey -SecretValue $(ConvertTo-SecureString $TopicKey -AsPlainText -Force)).Id
+$eventgridendpoint=(Get-AzEventGridTopic -ResourceGroupName $RGName -TopicName $TopicName).Endpoint
+
+
+#Read value
+#Get the CosmosDB key - https://docs.microsoft.com/en-us/azure/cosmos-db/scripts/powershell/common/ps-account-keys-connection-strings
+$resourceType = "Microsoft.DocumentDb/databaseAccounts" 
+$cosmosDBKey=(Invoke-AzResourceAction -Force -Action listKeys  -ResourceType $resourceType -ApiVersion "2015-04-08" -ResourceGroupName $RGName -Name $accountName ).primaryMasterKey
+#set Value
+$cosmossecret=(Set-AzKeyVaultSecret -VaultName $keyvaultname -Name cosmosDBAuthorizationKey -SecretValue $(ConvertTo-SecureString $cosmosDBKey -AsPlainText -Force)).Id
+
+#Read value
+$blobKey = ((Get-AzStorageAccountKey -Name $Tollboothstorage -ResourceGroupName $RGName )| Where-Object {$_.KeyName -eq "key1"}).Value
+#set Value
+$blobsecret=(Set-AzKeyVaultSecret -VaultName $keyvaultname -Name blobStorageConnection -SecretValue $(ConvertTo-SecureString $blobKey -AsPlainText -Force)).Id
+
+
+######## SECTION 2 ############
+$computerVisionApiKey="@Microsoft.KeyVault(SecretUri="+$compviewsecret+")"
+$eventGridTopicKey="@Microsoft.KeyVault(SecretUri="+$eventgridsecret+")"
+$cosmosDBAuthorizationKey="@Microsoft.KeyVault(SecretUri="+$cosmossecret+")"
+$blobStorageConnection="@Microsoft.KeyVault(SecretUri="+$blobsecret+")"
+
+az functionapp config appsettings set --subscription $subscription  --name $functionAppName `
+--resource-group $RGName  `
+--settings $("computerVisionApiUrl="+$visionendpoint+"vision/v2.0/ocr") `
+$(" computerVisionApiKey="+$computerVisionApiKey) `
+$(" eventGridTopicEndpoint="+$eventgridendpoint) `
+$(" eventGridTopicKey="+$eventGridTopicKey) `
+$(" cosmosDBEndPointUrl=https://"+$accountName+".documents.azure.com:443/") `
+$(" cosmosDBAuthorizationKey="+$cosmosDBAuthorizationKey) `
+$(" cosmosDBDatabaseId=LicensePlates") `
+$(" cosmosDBCollectionId=Processed") `
+$(" exportCsvContainerName=export") `
+$(" blobStorageConnection="+$blobStorageConnection)
+
